@@ -42,7 +42,8 @@ async function fetchStockData(stockCode: string, market: 'sh' | 'sz', datalen: n
       }
     })
     
-    const text = await response.text()
+    const buffer = await response.arrayBuffer()
+    const text = new TextDecoder('gbk').decode(buffer)
     // 解析JSONP响应
     const jsonMatch = text.match(/\[[\s\S]*\]/)
     if (!jsonMatch) {
@@ -79,7 +80,8 @@ async function fetchIndexData(indexCode: string, market: 'sh' | 'sz', datalen: n
       }
     })
     
-    const text = await response.text()
+    const buffer = await response.arrayBuffer()
+    const text = new TextDecoder('gbk').decode(buffer)
     const jsonMatch = text.match(/\[[\s\S]*\]/)
     if (!jsonMatch) {
       return null
@@ -113,21 +115,57 @@ async function fetchStockInfo(stockCode: string, market: 'sh' | 'sz') {
       }
     })
     
-    const text = await response.text()
+    const buffer = await response.arrayBuffer()
+    const text = new TextDecoder('gbk').decode(buffer)
     const match = text.match(/"(.+)"/)
     if (!match) return null
     
     const parts = match[1].split(',')
+    const current = parseFloat(parts[3])
     return {
       name: parts[0],
       open: parseFloat(parts[1]),
       lastClose: parseFloat(parts[2]),
-      current: parseFloat(parts[3]),
+      current: Number.isNaN(current) ? null : current,
       high: parseFloat(parts[4]),
       low: parseFloat(parts[5])
     }
   } catch (error) {
     console.error('Error fetching stock info:', error)
+    return null
+  }
+}
+
+// 获取指数实时信息
+async function fetchIndexInfo(indexCode: string, market: 'sh' | 'sz') {
+  const symbol = market === 'sh' ? `sh${indexCode}` : `sz${indexCode}`
+  const url = `https://hq.sinajs.cn/list=${symbol}`
+
+  try {
+    const response = await fetch(url, {
+      headers: {
+        'Referer': 'https://finance.sina.com.cn',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      }
+    })
+
+    const buffer = await response.arrayBuffer()
+    const text = new TextDecoder('gbk').decode(buffer)
+    const match = text.match(/"(.+)"/)
+    if (!match) return null
+
+    const parts = match[1].split(',')
+    const current = parseFloat(parts[3])
+    return {
+      name: parts[0],
+      open: parseFloat(parts[1]),
+      lastClose: parseFloat(parts[2]),
+      current: Number.isNaN(current) ? null : current,
+      high: parseFloat(parts[4]),
+      low: parseFloat(parts[5])
+    }
+  } catch (error) {
+    console.error('Error fetching index info:', error)
     return null
   }
 }
@@ -149,10 +187,11 @@ export async function GET(request: NextRequest) {
   // 拉取更多数据以支持历史查询（30天 + offset + 缓冲）
   const datalen = 35 + offsetDays + 5
   
-  const [allStockData, allIndexData, stockInfo] = await Promise.all([
+  const [allStockData, allIndexData, stockInfo, indexInfo] = await Promise.all([
     fetchStockData(stockCode, marketInfo.market, datalen),
     fetchIndexData(marketInfo.indexCode, marketInfo.market, datalen),
-    fetchStockInfo(stockCode, marketInfo.market)
+    fetchStockInfo(stockCode, marketInfo.market),
+    fetchIndexInfo(marketInfo.indexCode, marketInfo.market)
   ])
   
   if (!allStockData || !allIndexData) {
@@ -222,16 +261,25 @@ export async function GET(request: NextRequest) {
   const latestDeviation = deviationsWithCumulative[deviationsWithCumulative.length - 1]
   const totalDeviation = latestDeviation?.cumulativeDeviation || 0
   
-  // 获取最新价格
+  // 获取最新收盘价
   const latestStockPrice = stockData[stockData.length - 1]?.close || 0
   const latestIndexPrice = indexData[indexData.length - 1]?.close || 0
 
-  // 计算未来三天（今天/明天/后天）在假设指数不变下的安全价格区间
-  // 简化公式推导：
-  // allowedMaxStock = baseStock * (latestIndex/baseIndex + 2)
-  // allowedMinStock = baseStock * (latestIndex/baseIndex - 2)
+  // 实时价格（优先使用新浪实时行情）
+  const realtimeStockPrice = stockInfo?.current ?? latestStockPrice
+  const realtimeIndexPrice = indexInfo?.current ?? latestIndexPrice
+
+  // 实时偏离值：使用实时价格与30日前基准价计算
+  const realtimeTotalDeviation = ((realtimeStockPrice - baseStockPrice) / baseStockPrice) * 100 - ((realtimeIndexPrice - baseIndexPrice) / baseIndexPrice) * 100
+
+  console.info('stockInfo:', stockCode, stockInfo)
+  console.info('indexInfo:', marketInfo.indexCode, indexInfo)
+  console.info('resolvedStockName:', stockInfo?.name || stockCode.replace(/^(sh|sz|SH|SZ)/, ''))
+
+  // 计算未来多天的安全价格区间，基于滑动的30日基准日
+  // 今天/明天/后天以及后续5天的基准日依次使用 stockData 的前 8 个数据点
   const safeRanges: { date: string; baseStock: number; baseIndex: number; minSafe: number; maxSafe: number }[] = []
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < 8; i++) {
     const baseS = stockData[i]?.close
     const baseI = indexData[i]?.close
     if (baseS == null || baseI == null) continue
@@ -240,7 +288,13 @@ export async function GET(request: NextRequest) {
     const maxSafe = baseS * (ratio + 2)
     const minSafe = Math.max(0.01, baseS * (ratio - 2))
 
-    safeRanges.push({ date: stockData[i].date, baseStock: baseS, baseIndex: baseI, minSafe: Math.round(minSafe * 100) / 100, maxSafe: Math.round(maxSafe * 100) / 100 })
+    safeRanges.push({
+      date: stockData[i].date,
+      baseStock: baseS,
+      baseIndex: baseI,
+      minSafe: Math.round(minSafe * 100) / 100,
+      maxSafe: Math.round(maxSafe * 100) / 100
+    })
   }
   
   // 日期区间信息
@@ -253,7 +307,7 @@ export async function GET(request: NextRequest) {
   
   return NextResponse.json({
     stockCode: stockCode.replace(/^(sh|sz|SH|SZ)/, ''),
-    stockName: stockInfo?.name || '未知',
+    stockName: stockInfo?.name || stockCode.replace(/^(sh|sz|SH|SZ)/, ''),
     market: marketInfo.market.toUpperCase(),
     indexName: marketInfo.indexName,
     indexCode: marketInfo.indexCode,
@@ -261,9 +315,13 @@ export async function GET(request: NextRequest) {
     indexData,
     deviations: deviationsWithCumulative,
     totalDeviation,
+    realtimeStockPrice,
+    realtimeIndexPrice,
+    realtimeTotalDeviation,
     latestStockPrice,
     latestIndexPrice,
     stockInfo,
+    indexInfo,
     dateRange,
     baseStockPrice,
     baseIndexPrice,
