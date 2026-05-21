@@ -184,8 +184,8 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: '无效的股票代码，请输入A股股票代码' }, { status: 400 })
   }
   
-  // 拉取更多数据以支持历史查询（30天 + offset + 缓冲）
-  const datalen = 35 + offsetDays + 5
+  // 拉取更多数据以支持历史查询（30天 + 14天历史滑动 + offset + 缓冲）
+  const datalen = 31 + 14 + offsetDays + 5
   
   const [allStockData, allIndexData, stockInfo, indexInfo] = await Promise.all([
     fetchStockData(stockCode, marketInfo.market, datalen),
@@ -207,6 +207,11 @@ export async function GET(request: NextRequest) {
   
   const stockData = endIndex ? allStockData.slice(startIndex, endIndex) : allStockData.slice(startIndex)
   const indexData = endIndex ? allIndexData.slice(startIndex, endIndex) : allIndexData.slice(startIndex)
+
+  // 额外截取更长的数据用于历史14天滑动计算（需要 31+13=44 天数据）
+  const extStartIndex = endIndex ? -(31 + 13 + offsetDays) : -(31 + 13)
+  const extStockData = endIndex ? allStockData.slice(extStartIndex, endIndex) : allStockData.slice(extStartIndex)
+  const extIndexData = endIndex ? allIndexData.slice(extStartIndex, endIndex) : allIndexData.slice(extStartIndex)
   
   if (stockData.length < 31 || indexData.length < 31) {
     return NextResponse.json({ error: `数据不足，只有${stockData.length}天数据` }, { status: 400 })
@@ -297,6 +302,92 @@ export async function GET(request: NextRequest) {
     })
   }
   
+  // 计算过去14个交易日的每日累计偏离值（使用滑动的30日基准）
+  // extStockData/extIndexData 包含 31+13=44 天数据，最后一天与 stockData 最后一天对齐
+  // 对于 extStockData 中的第 i 天（i >= 30），其30日基准是 extStockData[i-30]
+  const extLen = extStockData.length
+  const historicalDeviations: {
+    date: string; stockPrice: number; indexPrice: number;
+    high: number; low: number;
+    stockCumulativeChange: number; indexCumulativeChange: number;
+    cumulativeDeviation: number; daysAgo: number;
+    baseDate: string; baseStockPrice: number;
+    safeMax: number; ma5: number;
+    nearSafeMax: boolean; suspectControl: boolean; lostControl: boolean;
+  }[] = []
+  // 取 extStockData 的最后14天，每天独立计算30日偏离
+  for (let dayIdx = 0; dayIdx < 14; dayIdx++) {
+    const currentIdx = extLen - 14 + dayIdx
+    if (currentIdx < 30 || currentIdx >= extLen) continue
+    const baseIdx = currentIdx - 30
+    const currentStock = extStockData[currentIdx]
+    const currentIndex = extIndexData[currentIdx]
+    const baseStock = extStockData[baseIdx]
+    const baseIndexItem = extIndexData[baseIdx]
+    if (!currentStock || !currentIndex || !baseStock || !baseIndexItem) continue
+
+    const stockCumChange = ((currentStock.close - baseStock.close) / baseStock.close) * 100
+    const indexCumChange = ((currentIndex.close - baseIndexItem.close) / baseIndexItem.close) * 100
+    const cumDeviation = stockCumChange - indexCumChange
+
+    // 安全上限：基准股票价 * (当日指数/基准指数 + 2)
+    const indexRatio = currentIndex.close / baseIndexItem.close
+    const safeMax = baseStock.close * (indexRatio + 2)
+
+    // 5日均线（取当天及前4天的收盘价平均）
+    let ma5Sum = 0
+    let ma5Count = 0
+    for (let k = 0; k < 5; k++) {
+      const maIdx = currentIdx - k
+      if (maIdx >= 0 && extStockData[maIdx]) {
+        ma5Sum += extStockData[maIdx].close
+        ma5Count++
+      }
+    }
+    const ma5 = ma5Count > 0 ? ma5Sum / ma5Count : currentStock.close
+
+    // 标记：接近安全上限（最高价达到安全上限的97%以上）
+    const nearSafeMax = currentStock.high >= safeMax * 0.97
+
+    // 标记：疑似控盘（前提是触及上限，且最高价比收盘价高出3%以上）
+    const suspectControl = nearSafeMax && currentStock.close > 0 && ((currentStock.high - currentStock.close) / currentStock.close) >= 0.03
+
+    // 最低价偏离5日线百分比（正值=最低价低于5日线，负值=最低价高于5日线）
+    const lowDeviationFromMa5 = ma5 > 0 ? ((ma5 - currentStock.low) / ma5) * 100 : 0
+
+    // 标记：不控盘信号（最低价低于5日线超过3%）
+    const lostControl = lowDeviationFromMa5 >= 3
+
+    // 当日涨跌幅（相对前一交易日收盘价）
+    const prevIdx = currentIdx - 1
+    const prevClose = prevIdx >= 0 && extStockData[prevIdx] ? extStockData[prevIdx].close : currentStock.close
+    const dailyChange = ((currentStock.close - prevClose) / prevClose) * 100
+    // 盘中最高涨幅（最高价相对前一交易日收盘价）
+    const intradayHighChange = ((currentStock.high - prevClose) / prevClose) * 100
+
+    historicalDeviations.push({
+      date: currentStock.date,
+      stockPrice: currentStock.close,
+      high: currentStock.high,
+      low: currentStock.low,
+      indexPrice: currentIndex.close,
+      dailyChange,
+      intradayHighChange,
+      stockCumulativeChange: stockCumChange,
+      indexCumulativeChange: indexCumChange,
+      cumulativeDeviation: cumDeviation,
+      daysAgo: 13 - dayIdx,
+      baseDate: baseStock.date,
+      baseStockPrice: baseStock.close,
+      safeMax: Math.round(safeMax * 100) / 100,
+      ma5: Math.round(ma5 * 100) / 100,
+      lowDeviationFromMa5: Math.round(lowDeviationFromMa5 * 100) / 100,
+      nearSafeMax,
+      suspectControl,
+      lostControl,
+    })
+  }
+
   // 日期区间信息
   const dateRange = {
     startDate: stockData[0]?.date,  // 30日窗口起始日（基准日）
@@ -326,5 +417,6 @@ export async function GET(request: NextRequest) {
     baseStockPrice,
     baseIndexPrice,
     safeRanges,
+    historicalDeviations,
   })
 }

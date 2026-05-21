@@ -54,6 +54,7 @@ interface StockData {
   baseStockPrice: number
   baseIndexPrice: number
   safeRanges?: SafeRange[]
+  historicalDeviations?: HistoricalDeviation[]
 }
 
 type RecentStock = {
@@ -67,6 +68,28 @@ interface SafeRange {
   baseIndex: number
   minSafe: number
   maxSafe: number
+}
+
+interface HistoricalDeviation {
+  date: string
+  stockPrice: number
+  high: number
+  low: number
+  indexPrice: number
+  dailyChange: number
+  intradayHighChange: number
+  stockCumulativeChange: number
+  indexCumulativeChange: number
+  cumulativeDeviation: number
+  daysAgo: number
+  baseDate: string
+  baseStockPrice: number
+  safeMax: number
+  ma5: number
+  lowDeviationFromMa5: number
+  nearSafeMax: boolean
+  suspectControl: boolean
+  lostControl: boolean
 }
 
 export default function StockAnalyzer() {
@@ -391,6 +414,119 @@ export default function StockAnalyzer() {
               </Card>
             </div>
             
+            {/* 过去14天偏离追踪 */}
+            {data.historicalDeviations && data.historicalDeviations.length > 0 && (
+              <Card className="bg-card border-border">
+                <CardHeader>
+                  <CardTitle className="text-foreground">过去14个交易日偏离追踪</CardTitle>
+                  <CardDescription className="text-muted-foreground">
+                    追踪最近14个交易日的累计偏离值变化，帮助判断从第几天开始进入异动监控区间
+                  </CardDescription>
+                  <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+                    <div className="p-2 rounded border border-red-200 bg-red-50 dark:border-red-900 dark:bg-red-950/30">
+                      <span className="font-semibold text-red-700 dark:text-red-400">🔴 触及上限：</span>
+                      <span className="text-muted-foreground">当日最高价 ≥ 安全上限 × 97%，说明盘中已接近异动触发线</span>
+                    </div>
+                    <div className="p-2 rounded border border-orange-200 bg-orange-50 dark:border-orange-900 dark:bg-orange-950/30">
+                      <span className="font-semibold text-orange-700 dark:text-orange-400">🟠 疑似控盘：</span>
+                      <span className="text-muted-foreground">触及上限且最高价比收盘价高 ≥ 3%，盘中冲高后被打压回收盘</span>
+                    </div>
+                    <div className="p-2 rounded border border-purple-200 bg-purple-50 dark:border-purple-900 dark:bg-purple-950/30">
+                      <span className="font-semibold text-purple-700 dark:text-purple-400">🟣 不控盘：</span>
+                      <span className="text-muted-foreground">最低价偏离5日线 ≥ 3%，说明下方支撑丢失，控盘力度不足</span>
+                    </div>
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  <div className="overflow-x-auto">
+                    <Table>
+                      <TableHeader>
+                        <TableRow className="border-border hover:bg-secondary/50">
+                          <TableHead className="text-muted-foreground">日期</TableHead>
+                          <TableHead className="text-muted-foreground text-center">T-N</TableHead>
+                          <TableHead className="text-muted-foreground">基准日期</TableHead>
+                          <TableHead className="text-muted-foreground text-right">基准股票价</TableHead>
+                          <TableHead className="text-muted-foreground text-right">最高价</TableHead>
+                          <TableHead className="text-muted-foreground text-right">安全上限</TableHead>
+                          <TableHead className="text-muted-foreground text-right">收盘价</TableHead>
+                          <TableHead className="text-muted-foreground text-right">涨跌幅</TableHead>
+                          <TableHead className="text-muted-foreground text-right">盘中最高涨幅</TableHead>
+                          <TableHead className="text-muted-foreground text-right">最低价</TableHead>
+                          <TableHead className="text-muted-foreground text-right">5日线</TableHead>
+                          <TableHead className="text-muted-foreground text-right">低偏离MA5%</TableHead>
+                          <TableHead className="text-muted-foreground text-right">累计偏离值</TableHead>
+                          <TableHead className="text-muted-foreground text-center">信号</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {data.historicalDeviations.map((row) => {
+                          const isWarning = Math.abs(row.cumulativeDeviation) >= 150
+                          const isDanger = Math.abs(row.cumulativeDeviation) >= 200
+                          return (
+                            <TableRow key={row.date} className={`border-border hover:bg-secondary/50 ${row.nearSafeMax ? 'bg-destructive/10' : isDanger ? 'bg-destructive/5' : isWarning ? 'bg-yellow-500/5' : ''}`}>
+                              <TableCell className="text-foreground font-mono">{formatTradingDate(row.date)}</TableCell>
+                              <TableCell className="text-center">
+                                <Badge variant="outline" className="text-xs">
+                                  {row.daysAgo === 0 ? '最新' : `T-${row.daysAgo}`}
+                                </Badge>
+                              </TableCell>
+                              <TableCell className="text-foreground font-mono text-sm">{row.baseDate}</TableCell>
+                              <TableCell className="text-right text-foreground font-mono">¥{row.baseStockPrice.toFixed(2)}</TableCell>
+                              <TableCell className={`text-right font-mono ${row.suspectControl ? 'text-orange-600 font-bold' : 'text-foreground'}`}>
+                                ¥{row.high.toFixed(2)}
+                              </TableCell>
+                              <TableCell className={`text-right font-mono ${row.nearSafeMax ? 'text-red-600 font-bold' : 'text-foreground'}`}>
+                                ¥{row.safeMax.toFixed(2)}
+                              </TableCell>
+                              <TableCell className="text-right text-foreground font-mono">¥{row.stockPrice.toFixed(2)}</TableCell>
+                              <TableCell className={`text-right font-mono ${agColorClass(row.dailyChange)}`}>
+                                {row.dailyChange >= 0 ? '+' : ''}{row.dailyChange.toFixed(2)}%
+                              </TableCell>
+                              <TableCell className={`text-right font-mono ${agColorClass(row.intradayHighChange)}`}>
+                                {row.intradayHighChange >= 0 ? '+' : ''}{row.intradayHighChange.toFixed(2)}%
+                              </TableCell>
+                              <TableCell className={`text-right font-mono ${row.lostControl ? 'text-purple-600 font-bold' : 'text-foreground'}`}>
+                                ¥{row.low.toFixed(2)}
+                              </TableCell>
+                              <TableCell className="text-right text-muted-foreground font-mono">¥{row.ma5.toFixed(2)}</TableCell>
+                              <TableCell className={`text-right font-mono ${row.lostControl ? 'text-purple-600 font-bold' : row.lowDeviationFromMa5 > 0 ? 'text-yellow-600' : 'text-muted-foreground'}`}>
+                                {row.lowDeviationFromMa5 > 0 ? '+' : ''}{row.lowDeviationFromMa5.toFixed(2)}%
+                              </TableCell>
+                              <TableCell className={`text-right font-mono font-bold ${agColorClass(row.cumulativeDeviation)}`}>
+                                {row.cumulativeDeviation >= 0 ? '+' : ''}{row.cumulativeDeviation.toFixed(2)}%
+                              </TableCell>
+                              <TableCell className="text-center">
+                                <div className="flex flex-col gap-1 items-center">
+                                  {row.nearSafeMax && (
+                                    <Badge variant="destructive" className="text-xs whitespace-nowrap">触及上限</Badge>
+                                  )}
+                                  {row.suspectControl && (
+                                    <Badge className="text-xs bg-orange-500/20 text-orange-700 border-orange-500/30 whitespace-nowrap">疑似控盘</Badge>
+                                  )}
+                                  {row.lostControl && (
+                                    <Badge className="text-xs bg-purple-500/20 text-purple-700 border-purple-500/30 whitespace-nowrap">不控盘</Badge>
+                                  )}
+                                  {!row.nearSafeMax && !row.suspectControl && !row.lostControl && (
+                                    isDanger ? (
+                                      <Badge variant="destructive" className="text-xs">异动</Badge>
+                                    ) : isWarning ? (
+                                      <Badge className="text-xs bg-yellow-500/20 text-yellow-700 border-yellow-500/30">接近</Badge>
+                                    ) : (
+                                      <Badge variant="outline" className="text-xs text-muted-foreground">正常</Badge>
+                                    )
+                                  )}
+                                </div>
+                              </TableCell>
+                            </TableRow>
+                          )
+                        })}
+                      </TableBody>
+                    </Table>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
             <Card className="bg-card border-border">
               <CardHeader>
                 <CardTitle className="text-foreground">服务端安全临界</CardTitle>
@@ -442,7 +578,6 @@ export default function StockAnalyzer() {
                           const adjustedMaxSafe = item.baseStock * (adjustedRatio + 2)
                           const change = currentPrice ? ((adjustedMaxSafe / currentPrice - 1) * 100) : 0
 
-                          // 计算与上日（前一行）的安全上限环比变化
                           let prevAdjustedMax: number | null = null
                           if (index > 0) {
                             const prev = safeRanges[index - 1]
