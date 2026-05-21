@@ -159,17 +159,17 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: '获取数据失败，请稍后重试' }, { status: 500 })
   }
   
-  // 根据offset截取30天数据
-  // offset=0: 取最后30天 (slice(-30))
-  // offset=1: 取倒数第2到第31天 (slice(-31, -1))
-  // offset=2: 取倒数第3到第32天 (slice(-32, -2))
+  // 根据offset截取31天数据，确保当前窗口的基准日是D-30
+  // offset=0: 取最后31天 (slice(-31))
+  // offset=1: 取倒数第2到第32天 (slice(-32, -1))
+  // offset=2: 取倒数第3到第33天 (slice(-33, -2))
   const endIndex = offsetDays > 0 ? -offsetDays : undefined
-  const startIndex = endIndex ? -(30 + offsetDays) : -30
+  const startIndex = endIndex ? -(31 + offsetDays) : -31
   
   const stockData = endIndex ? allStockData.slice(startIndex, endIndex) : allStockData.slice(startIndex)
   const indexData = endIndex ? allIndexData.slice(startIndex, endIndex) : allIndexData.slice(startIndex)
   
-  if (stockData.length < 30 || indexData.length < 30) {
+  if (stockData.length < 31 || indexData.length < 31) {
     return NextResponse.json({ error: `数据不足，只有${stockData.length}天数据` }, { status: 400 })
   }
   
@@ -225,6 +225,23 @@ export async function GET(request: NextRequest) {
   // 获取最新价格
   const latestStockPrice = stockData[stockData.length - 1]?.close || 0
   const latestIndexPrice = indexData[indexData.length - 1]?.close || 0
+
+  // 计算未来三天（今天/明天/后天）在假设指数不变下的安全价格区间
+  // 简化公式推导：
+  // allowedMaxStock = baseStock * (latestIndex/baseIndex + 2)
+  // allowedMinStock = baseStock * (latestIndex/baseIndex - 2)
+  const safeRanges: { date: string; baseStock: number; baseIndex: number; minSafe: number; maxSafe: number }[] = []
+  for (let i = 0; i < 3; i++) {
+    const baseS = stockData[i]?.close
+    const baseI = indexData[i]?.close
+    if (baseS == null || baseI == null) continue
+
+    const ratio = latestIndexPrice / baseI
+    const maxSafe = baseS * (ratio + 2)
+    const minSafe = Math.max(0.01, baseS * (ratio - 2))
+
+    safeRanges.push({ date: stockData[i].date, baseStock: baseS, baseIndex: baseI, minSafe: Math.round(minSafe * 100) / 100, maxSafe: Math.round(maxSafe * 100) / 100 })
+  }
   
   // 日期区间信息
   const dateRange = {
@@ -249,6 +266,7 @@ export async function GET(request: NextRequest) {
     stockInfo,
     dateRange,
     baseStockPrice,
-    baseIndexPrice
+    baseIndexPrice,
+    safeRanges,
   })
 }

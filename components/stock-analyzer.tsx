@@ -54,6 +54,7 @@ interface StockData {
   dateRange: DateRange
   baseStockPrice: number
   baseIndexPrice: number
+  safeRanges?: SafeRange[]
 }
 
 interface PricePrediction {
@@ -67,6 +68,14 @@ interface PricePrediction {
   currentDeviation: number
 }
 
+interface SafeRange {
+  date: string
+  baseStock: number
+  baseIndex: number
+  minSafe: number
+  maxSafe: number
+}
+
 export default function StockAnalyzer() {
   const [stockCode, setStockCode] = useState('')
   const [loading, setLoading] = useState(false)
@@ -75,6 +84,8 @@ export default function StockAnalyzer() {
   const [indexVolatility, setIndexVolatility] = useState([3]) // 指数波动范围 ±x%
   const [predictions, setPredictions] = useState<PricePrediction[]>([])
   const [offsetDays, setOffsetDays] = useState('0') // 0=今天, 1=昨天, 2=前天...
+  const [indexAssumption, setIndexAssumption] = useState<'unchanged' | 'fixed' | 'percent'>('unchanged')
+  const [assumedIndexValue, setAssumedIndexValue] = useState('0')
   
   // 200% 异动阈值
   const ABNORMAL_THRESHOLD = 200
@@ -119,7 +130,7 @@ export default function StockAnalyzer() {
   
   // 计算价格预测 - 使用正确的偏离计算口径
   // 30日偏离 = 股票30日累计涨跌幅 - 指数30日累计涨跌幅
-  // 关键：30日窗口会滑动！明天的基准价是D-28，后天的基准价是D-27
+  // 关键：30日窗口会滑动！明天的基准价是D-29，后天的基准价是D-28
   const calculatePredictions = useCallback((stockData: StockData, volatility: number) => {
     if (!stockData || stockData.stockData.length === 0 || stockData.indexData.length === 0) return
     
@@ -135,9 +146,9 @@ export default function StockAnalyzer() {
     
     for (let i = 0; i < 3; i++) {
       // 30日窗口滑动：今天用stockData[0]，明天用stockData[1]，后天用stockData[2]
-      // i=0(今天): 基准是30日前的价格 stockData[0]
-      // i=1(明天): 窗口滑动1天，基准变成stockData[1]（原来的D-28）
-      // i=2(后天): 窗口滑动2天，基准变成stockData[2]（原来的D-27）
+      // i=0(今天): 基准是30日前的价格 stockData[0]（D-30）
+      // i=1(明天): 窗口滑动1天，基准变成stockData[1]（D-29）
+      // i=2(后天): 窗口滑动2天，基准变成stockData[2]（D-28）
       const baseStockPrice = stockData.stockData[i]?.close || stockData.stockData[0].close
       const baseIndexPrice = stockData.indexData[i]?.close || stockData.indexData[0].close
       
@@ -201,6 +212,33 @@ export default function StockAnalyzer() {
       calculatePredictions(data, value[0])
     }
   }
+
+  const computedSafeRanges: SafeRange[] = data ? (() => {
+    const latestIndexPrice = data.latestIndexPrice
+    const assumedIndexPrice = indexAssumption === 'fixed'
+      ? Number(assumedIndexValue) || latestIndexPrice
+      : indexAssumption === 'percent'
+        ? latestIndexPrice * (1 + (Number(assumedIndexValue) || 0) / 100)
+        : latestIndexPrice
+
+    return [0, 1, 2].map((i) => {
+      const baseS = data.stockData[i]?.close
+      const baseI = data.indexData[i]?.close
+      if (baseS == null || baseI == null) {
+        return { date: '', baseStock: 0, baseIndex: 0, minSafe: 0, maxSafe: 0 }
+      }
+      const ratio = assumedIndexPrice / baseI
+      const maxSafe = Math.round(baseS * (ratio + 2) * 100) / 100
+      const minSafe = Math.round(Math.max(0.01, baseS * (ratio - 2)) * 100) / 100
+      return {
+        date: data.stockData[i].date,
+        baseStock: baseS,
+        baseIndex: baseI,
+        minSafe,
+        maxSafe
+      }
+    })
+  })() : []
   
   // 格式化图表数据
   const getChartData = () => {
@@ -268,7 +306,7 @@ export default function StockAnalyzer() {
                   />
                 </div>
                 <Button 
-                  onClick={fetchData} 
+                  onClick={() => fetchData()} 
                   disabled={loading}
                   className="bg-primary text-primary-foreground hover:bg-primary/90"
                 >
@@ -567,26 +605,63 @@ export default function StockAnalyzer() {
                   </CardHeader>
                   <CardContent className="space-y-6">
                     <div className="space-y-4">
-                      <div className="flex items-center justify-between">
-                        <label className="text-sm font-medium text-foreground">
-                          指数日涨跌幅范围: ±{indexVolatility[0]}%
-                        </label>
-                        <Badge variant="outline" className="border-border">
-                          当前累计偏离: {data.totalDeviation.toFixed(2)}%
-                        </Badge>
-                      </div>
-                      <Slider
-                        value={indexVolatility}
-                        onValueChange={handleVolatilityChange}
-                        min={0.5}
-                        max={10}
-                        step={0.5}
-                        className="w-full"
-                      />
-                      <div className="flex justify-between text-xs text-muted-foreground">
-                        <span>±0.5%</span>
-                        <span>±5%</span>
-                        <span>±10%</span>
+                      <div className="flex flex-col gap-3">
+                        <div className="flex items-center justify-between">
+                          <label className="text-sm font-medium text-foreground">
+                            指数日涨跌幅范围: ±{indexVolatility[0]}%
+                          </label>
+                          <Badge variant="outline" className="border-border">
+                            当前累计偏离: {data.totalDeviation.toFixed(2)}%
+                          </Badge>
+                        </div>
+                        <Slider
+                          value={indexVolatility}
+                          onValueChange={handleVolatilityChange}
+                          min={0.5}
+                          max={10}
+                          step={0.5}
+                          className="w-full"
+                        />
+                        <div className="flex justify-between text-xs text-muted-foreground">
+                          <span>±0.5%</span>
+                          <span>±5%</span>
+                          <span>±10%</span>
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                          <div>
+                            <div className="text-xs text-muted-foreground mb-1">指数假设类型</div>
+                            <Select value={indexAssumption} onValueChange={(value) => setIndexAssumption(value as 'unchanged' | 'fixed' | 'percent')}>
+                              <SelectTrigger className="w-full">
+                                <SelectValue placeholder="选择假设类型" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="unchanged">指数不变</SelectItem>
+                                <SelectItem value="fixed">指定指数点位</SelectItem>
+                                <SelectItem value="percent">指定指数涨跌幅</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+                          <div className="col-span-1 md:col-span-2">
+                            <div className="text-xs text-muted-foreground mb-1">
+                              {indexAssumption === 'fixed'
+                                ? '指定指数点位'
+                                : indexAssumption === 'percent'
+                                  ? '指定指数涨跌幅（相对于当前点位）'
+                                  : '使用当前上证指数不变'}
+                            </div>
+                            <Input
+                              value={assumedIndexValue}
+                              onChange={(e) => setAssumedIndexValue(e.target.value)}
+                              type="number"
+                              disabled={indexAssumption === 'unchanged'}
+                              placeholder={indexAssumption === 'fixed' ? '例如 4077.28' : '例如 0.5'}
+                              className="w-full bg-input border-border text-foreground placeholder:text-muted-foreground"
+                            />
+                          </div>
+                        </div>
+                        <div className="text-xs text-muted-foreground">
+                          当前指数假设: {indexAssumption === 'fixed' ? `${Number(assumedIndexValue || 0).toFixed(2)} 点` : indexAssumption === 'percent' ? `${Number(assumedIndexValue || 0).toFixed(2)}%` : '当前指数不变'}
+                        </div>
                       </div>
                     </div>
                     
@@ -624,6 +699,22 @@ export default function StockAnalyzer() {
                                 距±200%阈值: {(200 - Math.abs(pred.currentDeviation)).toFixed(2)}%
                               </div>
                             </div>
+                            {/* 显示后端返回的基准日期与临界值（如果可用） */}
+                            {(() => {
+                              const sr = computedSafeRanges[index]
+                              if (!sr) return null
+                              const criticalPrice = sr.maxSafe
+                              const criticalCum = Math.round(((criticalPrice / sr.baseStock - 1) * 100) * 100) / 100
+                              const todayClose = data?.latestStockPrice || 0
+                              const needChange = todayClose > 0 ? Math.round(((criticalPrice / todayClose - 1) * 100) * 100) / 100 : 0
+                              return (
+                                <div className="pt-2 border-t border-border space-y-1 text-xs text-muted-foreground">
+                                  <div>基准日期: {sr.date}</div>
+                                  <div>临界上限价: ¥{criticalPrice.toFixed(2)}（临界涨幅: {criticalCum >= 0 ? '+' : ''}{criticalCum}%）</div>
+                                  <div>以今日收盘计需变动: {needChange >= 0 ? '+' : ''}{needChange}%</div>
+                                </div>
+                              )
+                            })()}
                           </CardContent>
                         </Card>
                       ))}
@@ -636,8 +727,8 @@ export default function StockAnalyzer() {
                           <p className="font-medium text-foreground mb-1">计算说明</p>
                           <p>
                             30日200%严重异动是指股票相对指数的累计偏离值达到±200%。
-                            <strong>重要：30日窗口会随时间滑动</strong>，明天的基准价是今天窗口中的第2天（D-28），
-                            后天的基准价是第3天（D-27）。当基准价变化时，累计偏离值会重新计算。
+                            <strong>重要：30日窗口会随时间滑动</strong>，明天的基准价是今天窗口中的第2天（D-29），
+                            后天的基准价是第3天（D-28）。当基准价变化时，累计偏离值会重新计算。
                             预测基于设定的指数波动范围，计算股票在不触发异动前提下的安全价格区间。
                           </p>
                         </div>
