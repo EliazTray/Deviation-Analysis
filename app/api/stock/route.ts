@@ -358,6 +358,9 @@ export async function GET(request: NextRequest) {
     // 标记：不控盘信号（最低价低于5日线超过3%）
     const lostControl = lowDeviationFromMa5 >= 3
 
+    // 标记：失控（最低价偏离5日线>=10%，已脱离趋势）
+    const outOfControl = lowDeviationFromMa5 >= 10
+
     // 当日涨跌幅（相对前一交易日收盘价）
     const prevIdx = currentIdx - 1
     const prevClose = prevIdx >= 0 && extStockData[prevIdx] ? extStockData[prevIdx].close : currentStock.close
@@ -385,6 +388,7 @@ export async function GET(request: NextRequest) {
       nearSafeMax,
       suspectControl,
       lostControl,
+      outOfControl,
     })
   }
 

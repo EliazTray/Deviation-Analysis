@@ -90,6 +90,7 @@ interface HistoricalDeviation {
   nearSafeMax: boolean
   suspectControl: boolean
   lostControl: boolean
+  outOfControl: boolean
 }
 
 export default function StockAnalyzer() {
@@ -435,6 +436,10 @@ export default function StockAnalyzer() {
                       <span className="font-semibold text-purple-700 dark:text-purple-400">🟣 不控盘：</span>
                       <span className="text-muted-foreground">最低价偏离5日线 ≥ 3%，说明下方支撑丢失，控盘力度不足</span>
                     </div>
+                    <div className="p-2 rounded border border-red-300 bg-red-100 dark:border-red-800 dark:bg-red-950/40">
+                      <span className="font-semibold text-red-800 dark:text-red-300">⚫ 失控：</span>
+                      <span className="text-muted-foreground">最低价偏离5日线 ≥ 10%，已脱离趋势，不在控盘范围内</span>
+                    </div>
                   </div>
                 </CardHeader>
                 <CardContent>
@@ -503,7 +508,10 @@ export default function StockAnalyzer() {
                                   {row.suspectControl && (
                                     <Badge className="text-xs bg-orange-500/20 text-orange-700 border-orange-500/30 whitespace-nowrap">疑似控盘</Badge>
                                   )}
-                                  {row.lostControl && (
+                                  {row.outOfControl && (
+                                    <Badge className="text-xs bg-red-700/20 text-red-900 border-red-700/30 whitespace-nowrap dark:text-red-300">失控</Badge>
+                                  )}
+                                  {row.lostControl && !row.outOfControl && (
                                     <Badge className="text-xs bg-purple-500/20 text-purple-700 border-purple-500/30 whitespace-nowrap">不控盘</Badge>
                                   )}
                                   {!row.nearSafeMax && !row.suspectControl && !row.lostControl && (
