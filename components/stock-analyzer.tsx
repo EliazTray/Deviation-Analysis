@@ -336,11 +336,11 @@ export default function StockAnalyzer() {
                 <CardContent>
                   <div className="flex items-center gap-2">
                     {data.totalDeviation >= 0 ? (
-                      <TrendingUp className="w-6 h-6 text-chart-1" />
+                      <TrendingUp className="w-6 h-6 text-red-600" />
                     ) : (
-                      <TrendingDown className="w-6 h-6 text-chart-2" />
+                      <TrendingDown className="w-6 h-6 text-green-600" />
                     )}
-                    <span className={`text-3xl font-bold ${data.totalDeviation >= 0 ? 'text-chart-1' : 'text-chart-2'}`}>
+                    <span className={`text-3xl font-bold ${agColorClass(data.totalDeviation)}`}>
                       {data.totalDeviation >= 0 ? '+' : ''}{data.totalDeviation.toFixed(2)}%
                     </span>
                   </div>
@@ -353,7 +353,7 @@ export default function StockAnalyzer() {
                   <div className="mt-3 space-y-2 text-sm text-muted-foreground border-t border-border pt-3">
                     <div>实时股票价: ¥{data.realtimeStockPrice.toFixed(2)}</div>
                     <div>实时指数价: {data.realtimeIndexPrice.toFixed(2)}</div>
-                    <div>实时30日偏离: <span className={data.realtimeTotalDeviation >= 0 ? 'text-chart-1' : 'text-chart-2'}>{data.realtimeTotalDeviation >= 0 ? '+' : ''}{data.realtimeTotalDeviation.toFixed(2)}%</span></div>
+                    <div>实时30日偏离: <span className={agColorClass(data.realtimeTotalDeviation)}>{data.realtimeTotalDeviation >= 0 ? '+' : ''}{data.realtimeTotalDeviation.toFixed(2)}%</span></div>
                   </div>
                 </CardContent>
               </Card>
@@ -467,10 +467,10 @@ export default function StockAnalyzer() {
                               <TableCell className="text-right font-mono text-foreground">{item.baseIndex.toFixed(2)}</TableCell>
                               <TableCell className="text-right font-mono text-foreground">{adjustedIndexPrice.toFixed(2)}</TableCell>
                               <TableCell className={`text-right font-mono ${upperColorClass}`}>¥{adjustedMaxSafe.toFixed(2)}</TableCell>
-                              <TableCell className={`text-right font-mono ${dayToDayChange !== null ? (dayToDayChange >= 0 ? 'text-chart-1' : 'text-chart-2') : 'text-muted-foreground'}`}>
+                              <TableCell className={`text-right font-mono ${dayToDayChange !== null ? agColorClass(dayToDayChange) : 'text-muted-foreground'}`}>
                                 {dayToDayChange !== null ? `${dayToDayChange >= 0 ? '+' : ''}${dayToDayChange.toFixed(2)}%` : '—'}
                               </TableCell>
-                              <TableCell className={`text-right font-mono ${change >= 0 ? 'text-chart-1' : 'text-chart-2'}`}>
+                              <TableCell className={`text-right font-mono ${agColorClass(change)}`}>
                                 {change >= 0 ? '+' : ''}{change.toFixed(2)}%
                               </TableCell>
                             </TableRow>
@@ -513,16 +513,16 @@ export default function StockAnalyzer() {
                           <TableCell className="text-right text-foreground font-mono">
                             ¥{row.stockPrice.toFixed(2)}
                           </TableCell>
-                          <TableCell className={`text-right font-mono ${row.stockCumulativeChange >= 0 ? 'text-chart-1' : 'text-chart-2'}`}>
+                          <TableCell className={`text-right font-mono ${agColorClass(row.stockCumulativeChange)}`}>
                             {row.stockCumulativeChange >= 0 ? '+' : ''}{row.stockCumulativeChange.toFixed(2)}%
                           </TableCell>
                           <TableCell className="text-right text-foreground font-mono">
                             {row.indexPrice.toFixed(2)}
                           </TableCell>
-                          <TableCell className={`text-right font-mono ${row.indexCumulativeChange >= 0 ? 'text-chart-1' : 'text-chart-2'}`}>
+                          <TableCell className={`text-right font-mono ${agColorClass(row.indexCumulativeChange)}`}>
                             {row.indexCumulativeChange >= 0 ? '+' : ''}{row.indexCumulativeChange.toFixed(2)}%
                           </TableCell>
-                          <TableCell className={`text-right font-mono font-bold ${row.cumulativeDeviation >= 0 ? 'text-chart-1' : 'text-chart-2'}`}>
+                          <TableCell className={`text-right font-mono font-bold ${agColorClass(row.cumulativeDeviation)}`}>
                             {row.cumulativeDeviation >= 0 ? '+' : ''}{row.cumulativeDeviation.toFixed(2)}%
                           </TableCell>
                         </TableRow>
