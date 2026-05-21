@@ -143,7 +143,70 @@ export default function StockAnalyzer() {
   }, [stockCode, offsetDays])
 
   const safeRanges = data?.safeRanges || []
-  const safeLabels = ['今天', '明天', '后天', '大后天', 'D+4', 'D+5', 'D+6', 'D+7']
+  function formatTradingDate(yyyymmdd: string) {
+    if (!yyyymmdd) return ''
+    try {
+      // 支持格式：YYYYMMDD, YYYY-MM-DD, YYYY/MM/DD, 可选时间部分 'YYYY-MM-DD HH:mm:ss'
+      const m = yyyymmdd.match(/(\d{4})[-/]?(\d{2})[-/]?(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?/) 
+      if (!m) return yyyymmdd
+      const year = parseInt(m[1], 10)
+      const month = parseInt(m[2], 10)
+      const day = parseInt(m[3], 10)
+      const hour = m[4] ? parseInt(m[4], 10) : 0
+      const minute = m[5] ? parseInt(m[5], 10) : 0
+      const second = m[6] ? parseInt(m[6], 10) : 0
+
+      // 使用 UTC 构造时间，避免本地时区导致前一天/后一天的问题
+      const dt = new Date(Date.UTC(year, month - 1, day, hour, minute, second))
+      const weekdays = ['日', '一', '二', '三', '四', '五', '六']
+      const datePart = `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+      const timePart = (hour || minute || second) ? ` ${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}` : ''
+      return `${datePart}${timePart}（周${weekdays[dt.getUTCDay()]}）`
+    } catch {
+      return yyyymmdd
+    }
+  }
+  function relativeLabel(idx: number) {
+    switch (idx) {
+      case 0:
+        return '今天'
+      case 1:
+        return '明天'
+      case 2:
+        return '后天'
+      case 3:
+        return '大后天'
+      default:
+        return `D+${idx}`
+    }
+  }
+  function agColorClass(value: number | null | undefined, fallback = 'text-muted-foreground') {
+    if (value == null || Number.isNaN(value)) return fallback
+    return value >= 0 ? 'text-red-600' : 'text-green-600'
+  }
+  function getNextTradingDates(count: number) {
+    // 如果服务端返回了交易日日历，优先使用它
+    const serverCalendar = (data as any)?.tradingCalendar as string[] | undefined
+    if (Array.isArray(serverCalendar) && serverCalendar.length >= count) {
+      return serverCalendar.slice(0, count)
+    }
+
+    const out: string[] = []
+    const today = new Date()
+    // 从本地时间的今天开始，向前寻找未来的交易日（仅排除周末），如果遇到节假日不能识别则仍会包含
+    let dt = new Date(today.getFullYear(), today.getMonth(), today.getDate())
+    while (out.length < count) {
+      const day = dt.getDay()
+      if (day !== 0 && day !== 6) {
+        const y = dt.getFullYear()
+        const m = String(dt.getMonth() + 1).padStart(2, '0')
+        const d = String(dt.getDate()).padStart(2, '0')
+        out.push(`${y}${m}${d}`)
+      }
+      dt.setDate(dt.getDate() + 1)
+    }
+    return out
+  }
   const displayStockName = data?.stockName || data?.stockInfo?.name || data?.stockCode || stockCode || '未知'
   const currentPrice = data ? (data.realtimeStockPrice > 0 ? data.realtimeStockPrice : data.latestStockPrice) : 0
   const parsedIndexChange = parseFloat(indexChangeInput)
@@ -362,11 +425,13 @@ export default function StockAnalyzer() {
                     <Table>
                       <TableHeader>
                         <TableRow className="border-border hover:bg-secondary/50">
-                          <TableHead className="text-muted-foreground">标签</TableHead>
+                          <TableHead className="text-muted-foreground">交易日</TableHead>
                           <TableHead className="text-muted-foreground">基准日期</TableHead>
                           <TableHead className="text-muted-foreground text-right">基准股票价</TableHead>
                           <TableHead className="text-muted-foreground text-right">基准指数价</TableHead>
+                          <TableHead className="text-muted-foreground text-right">未来指数价</TableHead>
                           <TableHead className="text-muted-foreground text-right">安全上限</TableHead>
+                          <TableHead className="text-muted-foreground text-right">安全上限较上日涨跌%</TableHead>
                           <TableHead className="text-muted-foreground text-right">较实时报价涨跌</TableHead>
                         </TableRow>
                       </TableHeader>
@@ -376,13 +441,35 @@ export default function StockAnalyzer() {
                           const adjustedRatio = item.baseIndex > 0 ? adjustedIndexPrice / item.baseIndex : 1
                           const adjustedMaxSafe = item.baseStock * (adjustedRatio + 2)
                           const change = currentPrice ? ((adjustedMaxSafe / currentPrice - 1) * 100) : 0
+
+                          // 计算与上日（前一行）的安全上限环比变化
+                          let prevAdjustedMax: number | null = null
+                          if (index > 0) {
+                            const prev = safeRanges[index - 1]
+                            const prevAdjustedIndexPrice = (data?.realtimeIndexPrice > 0 ? data.realtimeIndexPrice : data.latestIndexPrice) * indexChangeFactor
+                            const prevAdjustedRatio = prev.baseIndex > 0 ? prevAdjustedIndexPrice / prev.baseIndex : 1
+                            prevAdjustedMax = prev.baseStock * (prevAdjustedRatio + 2)
+                          }
+                          const dayToDayChange = prevAdjustedMax ? ((adjustedMaxSafe - prevAdjustedMax) / prevAdjustedMax) * 100 : null
+
+                          const upperColorClass = adjustedMaxSafe > currentPrice ? 'text-red-600' : 'text-green-600'
+
                           return (
                             <TableRow key={`${item.date}-${index}`} className="border-border hover:bg-secondary/50">
-                              <TableCell className="font-medium">{safeLabels[index] || item.date}</TableCell>
+                              <TableCell className="font-medium">
+                                <div className="flex items-center gap-2">
+                                  <div>{formatTradingDate(getNextTradingDates(safeRanges.length)[index] || item.date)}</div>
+                                  <Badge variant="outline" className="text-xs">{relativeLabel(index)}</Badge>
+                                </div>
+                              </TableCell>
                               <TableCell className="font-mono">{item.date}</TableCell>
                               <TableCell className="text-right font-mono text-foreground">¥{item.baseStock.toFixed(2)}</TableCell>
                               <TableCell className="text-right font-mono text-foreground">{item.baseIndex.toFixed(2)}</TableCell>
-                              <TableCell className="text-right font-mono text-chart-1">¥{adjustedMaxSafe.toFixed(2)}</TableCell>
+                              <TableCell className="text-right font-mono text-foreground">{adjustedIndexPrice.toFixed(2)}</TableCell>
+                              <TableCell className={`text-right font-mono ${upperColorClass}`}>¥{adjustedMaxSafe.toFixed(2)}</TableCell>
+                              <TableCell className={`text-right font-mono ${dayToDayChange !== null ? (dayToDayChange >= 0 ? 'text-chart-1' : 'text-chart-2') : 'text-muted-foreground'}`}>
+                                {dayToDayChange !== null ? `${dayToDayChange >= 0 ? '+' : ''}${dayToDayChange.toFixed(2)}%` : '—'}
+                              </TableCell>
                               <TableCell className={`text-right font-mono ${change >= 0 ? 'text-chart-1' : 'text-chart-2'}`}>
                                 {change >= 0 ? '+' : ''}{change.toFixed(2)}%
                               </TableCell>
