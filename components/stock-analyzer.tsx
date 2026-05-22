@@ -99,7 +99,7 @@ export default function StockAnalyzer() {
   const [error, setError] = useState('')
   const [data, setData] = useState<StockData | null>(null)
   const [offsetDays, setOffsetDays] = useState('0') // 0=今天, 1=昨天, 2=前天...
-  const [indexChangeInput, setIndexChangeInput] = useState('0')
+  const [indexPriceInput, setIndexPriceInput] = useState('')
   const [recentStocks, setRecentStocks] = useState<RecentStock[]>([])
 
   const STORAGE_KEY = 'stock-analyzer-recent'
@@ -157,6 +157,9 @@ export default function StockAnalyzer() {
       }
 
       setData(result)
+      // 数据加载后，自动将指数价格输入框设为当前实时值
+      const realIdx = result.realtimeIndexPrice > 0 ? result.realtimeIndexPrice : result.latestIndexPrice
+      if (realIdx > 0) setIndexPriceInput(String(Math.round(realIdx)))
       addRecentStock(result.stockCode, result.stockName || result.stockInfo?.name || code)
     } catch {
       setError('网络错误，请稍后重试')
@@ -233,8 +236,11 @@ export default function StockAnalyzer() {
   }
   const displayStockName = data?.stockName || data?.stockInfo?.name || data?.stockCode || stockCode || '未知'
   const currentPrice = data ? (data.realtimeStockPrice > 0 ? data.realtimeStockPrice : data.latestStockPrice) : 0
-  const parsedIndexChange = parseFloat(indexChangeInput)
-  const indexChangeFactor = Number.isFinite(parsedIndexChange) ? 1 + parsedIndexChange / 100 : 1
+  // 用户直接输入指数价格，不依赖请求时刻的实时值
+  const inputIndexPrice = parseFloat(indexPriceInput)
+  const effectiveIndexPrice = Number.isFinite(inputIndexPrice) && inputIndexPrice > 0
+    ? inputIndexPrice
+    : (data ? (data.realtimeIndexPrice > 0 ? data.realtimeIndexPrice : data.latestIndexPrice) : 0)
   
   return (
     <div className="min-h-screen bg-background p-4 md:p-8">
@@ -545,22 +551,22 @@ export default function StockAnalyzer() {
               <CardContent>
                 <div className="mb-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                   <div>
-                    <div className="text-sm text-muted-foreground">指数涨跌幅</div>
+                    <div className="text-sm text-muted-foreground">指数价格（直接输入，避免延时）</div>
                     <div className="flex flex-col sm:flex-row sm:items-center gap-3 mt-2">
                       <Input
                         type="number"
-                        step="0.1"
-                        min="-10"
-                        max="10"
-                        value={indexChangeInput}
-                        onChange={(e) => setIndexChangeInput(e.target.value)}
-                        placeholder="输入指数涨跌幅"
-                        className="w-full sm:w-40 bg-input border-border text-foreground focus-visible:ring-primary/40 focus-visible:border-primary"
+                        step="10"
+                        value={indexPriceInput}
+                        onChange={(e) => setIndexPriceInput(e.target.value)}
+                        placeholder={data ? `${(data.realtimeIndexPrice > 0 ? data.realtimeIndexPrice : data.latestIndexPrice).toFixed(0)}` : '输入指数价格'}
+                        className="w-full sm:w-48 bg-input border-border text-foreground focus-visible:ring-primary/40 focus-visible:border-primary"
                       />
-                      <span className="text-sm text-muted-foreground">%</span>
+                      <span className="text-sm text-muted-foreground">
+                        当前使用: {effectiveIndexPrice.toFixed(2)}
+                      </span>
                     </div>
                     <div className="text-xs text-muted-foreground mt-2">
-                      指数涨跌幅范围 -10% 到 10%，步长 0.1%。
+                      直接输入指数价格进行计算，留空则使用请求时获取的实时值。
                     </div>
                   </div>
                 </div>
@@ -581,16 +587,15 @@ export default function StockAnalyzer() {
                       </TableHeader>
                       <TableBody>
                         {safeRanges.map((item, index) => {
-                          const adjustedIndexPrice = (data?.realtimeIndexPrice > 0 ? data.realtimeIndexPrice : data.latestIndexPrice) * indexChangeFactor
-                          const adjustedRatio = item.baseIndex > 0 ? adjustedIndexPrice / item.baseIndex : 1
+                          const adjustedRatio = item.baseIndex > 0 ? effectiveIndexPrice / item.baseIndex : 1
                           const adjustedMaxSafe = item.baseStock * (adjustedRatio + 2)
                           const change = currentPrice ? ((adjustedMaxSafe / currentPrice - 1) * 100) : 0
 
+                          // 计算与上日（前一行）的安全上限环比变化
                           let prevAdjustedMax: number | null = null
                           if (index > 0) {
                             const prev = safeRanges[index - 1]
-                            const prevAdjustedIndexPrice = (data?.realtimeIndexPrice > 0 ? data.realtimeIndexPrice : data.latestIndexPrice) * indexChangeFactor
-                            const prevAdjustedRatio = prev.baseIndex > 0 ? prevAdjustedIndexPrice / prev.baseIndex : 1
+                            const prevAdjustedRatio = prev.baseIndex > 0 ? effectiveIndexPrice / prev.baseIndex : 1
                             prevAdjustedMax = prev.baseStock * (prevAdjustedRatio + 2)
                           }
                           const dayToDayChange = prevAdjustedMax ? ((adjustedMaxSafe - prevAdjustedMax) / prevAdjustedMax) * 100 : null
@@ -608,7 +613,7 @@ export default function StockAnalyzer() {
                               <TableCell className="font-mono">{item.date}</TableCell>
                               <TableCell className="text-right font-mono text-foreground">¥{item.baseStock.toFixed(2)}</TableCell>
                               <TableCell className="text-right font-mono text-foreground">{item.baseIndex.toFixed(2)}</TableCell>
-                              <TableCell className="text-right font-mono text-foreground">{adjustedIndexPrice.toFixed(2)}</TableCell>
+                              <TableCell className="text-right font-mono text-foreground">{effectiveIndexPrice.toFixed(2)}</TableCell>
                               <TableCell className={`text-right font-mono ${upperColorClass}`}>¥{adjustedMaxSafe.toFixed(2)}</TableCell>
                               <TableCell className={`text-right font-mono ${dayToDayChange !== null ? agColorClass(dayToDayChange) : 'text-muted-foreground'}`}>
                                 {dayToDayChange !== null ? `${dayToDayChange >= 0 ? '+' : ''}${dayToDayChange.toFixed(2)}%` : '—'}
