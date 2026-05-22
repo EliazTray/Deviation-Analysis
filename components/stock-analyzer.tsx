@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useCallback, useEffect, useRef } from 'react'
+import { useSearchParams } from 'next/navigation'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
@@ -115,6 +116,7 @@ export default function StockAnalyzer() {
   const activeCodeRef = useRef<string>('')
 
   const STORAGE_KEY = 'stock-analyzer-recent'
+  const searchParams = useSearchParams()
 
   useEffect(() => {
     try {
@@ -127,6 +129,19 @@ export default function StockAnalyzer() {
       setRecentStocks([])
     }
   }, [])
+
+  // URL 参数 ?code=xxx 自动填充并触发查询
+  const urlCodeHandled = useRef(false)
+  useEffect(() => {
+    if (urlCodeHandled.current) return
+    const codeFromUrl = searchParams.get('code')
+    if (codeFromUrl) {
+      urlCodeHandled.current = true
+      setStockCode(codeFromUrl)
+      // 延迟触发，确保 state 已设置
+      setTimeout(() => fetchData(offsetDays, codeFromUrl), 0)
+    }
+  }, [searchParams])
 
   // 10秒轮询获取实时价格
   const fetchRealtime = useCallback(async (code: string) => {
