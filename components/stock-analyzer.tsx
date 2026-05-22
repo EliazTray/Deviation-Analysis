@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
@@ -93,6 +93,14 @@ interface HistoricalDeviation {
   outOfControl: boolean
 }
 
+interface RealtimePrice {
+  stockPrice: number | null
+  stockHigh: number | null
+  stockLow: number | null
+  indexPrice: number | null
+  timestamp: number
+}
+
 export default function StockAnalyzer() {
   const [stockCode, setStockCode] = useState('')
   const [loading, setLoading] = useState(false)
@@ -100,7 +108,11 @@ export default function StockAnalyzer() {
   const [data, setData] = useState<StockData | null>(null)
   const [offsetDays, setOffsetDays] = useState('0') // 0=今天, 1=昨天, 2=前天...
   const [indexPriceInput, setIndexPriceInput] = useState('')
+  const [indexPriceManuallySet, setIndexPriceManuallySet] = useState(false)
   const [recentStocks, setRecentStocks] = useState<RecentStock[]>([])
+  const [realtime, setRealtime] = useState<RealtimePrice | null>(null)
+  const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const activeCodeRef = useRef<string>('')
 
   const STORAGE_KEY = 'stock-analyzer-recent'
 
@@ -115,6 +127,48 @@ export default function StockAnalyzer() {
       setRecentStocks([])
     }
   }, [])
+
+  // 10秒轮询获取实时价格
+  const fetchRealtime = useCallback(async (code: string) => {
+    if (!code.trim()) return
+    try {
+      const res = await fetch(`/api/stock/realtime?code=${encodeURIComponent(code.trim())}`)
+      if (res.ok) {
+        const result = await res.json()
+        setRealtime({
+          stockPrice: result.stockPrice,
+          stockHigh: result.stockHigh,
+          stockLow: result.stockLow,
+          indexPrice: result.indexPrice,
+          timestamp: result.timestamp,
+        })
+      }
+    } catch {
+      // 静默失败，不影响使用
+    }
+  }, [])
+
+  useEffect(() => {
+    if (pollingRef.current) {
+      clearInterval(pollingRef.current)
+      pollingRef.current = null
+    }
+    if (!activeCodeRef.current) return
+
+    // 立即拉一次
+    fetchRealtime(activeCodeRef.current)
+    // 每10秒轮询
+    pollingRef.current = setInterval(() => {
+      fetchRealtime(activeCodeRef.current)
+    }, 10000)
+
+    return () => {
+      if (pollingRef.current) {
+        clearInterval(pollingRef.current)
+        pollingRef.current = null
+      }
+    }
+  }, [fetchRealtime])
 
   const saveRecentStocks = (stocks: RecentStock[]) => {
     try {
@@ -157,9 +211,16 @@ export default function StockAnalyzer() {
       }
 
       setData(result)
-      // 数据加载后，自动将指数价格输入框设为当前实时值
-      const realIdx = result.realtimeIndexPrice > 0 ? result.realtimeIndexPrice : result.latestIndexPrice
-      if (realIdx > 0) setIndexPriceInput(String(Math.round(realIdx)))
+      // 数据加载后重置手动标记，让实时值自动生效
+      setIndexPriceManuallySet(false)
+      setIndexPriceInput('')
+      // 启动实时轮询
+      activeCodeRef.current = result.stockCode || code.trim().replace(/^(sh|sz|SH|SZ)/, '')
+      fetchRealtime(activeCodeRef.current)
+      if (pollingRef.current) clearInterval(pollingRef.current)
+      pollingRef.current = setInterval(() => {
+        fetchRealtime(activeCodeRef.current)
+      }, 10000)
       addRecentStock(result.stockCode, result.stockName || result.stockInfo?.name || code)
     } catch {
       setError('网络错误，请稍后重试')
@@ -235,12 +296,14 @@ export default function StockAnalyzer() {
     return out
   }
   const displayStockName = data?.stockName || data?.stockInfo?.name || data?.stockCode || stockCode || '未知'
-  const currentPrice = data ? (data.realtimeStockPrice > 0 ? data.realtimeStockPrice : data.latestStockPrice) : 0
-  // 用户直接输入指数价格，不依赖请求时刻的实时值
+  // 实时股票价格：优先用轮询到的实时值，其次用请求时获取的值
+  const currentPrice = realtime?.stockPrice ?? (data ? (data.realtimeStockPrice > 0 ? data.realtimeStockPrice : data.latestStockPrice) : 0)
+  // 实时指数价格：如果用户手动修改过输入框，用用户输入；否则用轮询值自动更新
   const inputIndexPrice = parseFloat(indexPriceInput)
-  const effectiveIndexPrice = Number.isFinite(inputIndexPrice) && inputIndexPrice > 0
+  const realtimeIndexFallback = realtime?.indexPrice ?? (data ? (data.realtimeIndexPrice > 0 ? data.realtimeIndexPrice : data.latestIndexPrice) : 0)
+  const effectiveIndexPrice = indexPriceManuallySet && Number.isFinite(inputIndexPrice) && inputIndexPrice > 0
     ? inputIndexPrice
-    : (data ? (data.realtimeIndexPrice > 0 ? data.realtimeIndexPrice : data.latestIndexPrice) : 0)
+    : (realtimeIndexFallback || (Number.isFinite(inputIndexPrice) && inputIndexPrice > 0 ? inputIndexPrice : 0))
   
   return (
     <div className="min-h-screen bg-background p-4 md:p-8">
@@ -334,11 +397,33 @@ export default function StockAnalyzer() {
                     </Badge>
                   </div>
                   <div className="text-sm text-muted-foreground mt-1">
-                    {data.stockInfo?.name ? `实时行情：${data.stockInfo.name}` : '暂无实时股票名称，已显示代码'}
+                    {realtime ? (
+                      <span className="flex items-center gap-1">
+                        <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                        实时轮询中
+                      </span>
+                    ) : (
+                      data.stockInfo?.name ? `实时行情：${data.stockInfo.name}` : '暂无实时股票名称'
+                    )}
                   </div>
-                  <div className="text-3xl font-bold text-primary mt-2">
-                    ¥{data.latestStockPrice.toFixed(2)}
+                  <div className="flex items-baseline gap-3 mt-2">
+                    <div className="text-3xl font-bold text-primary">
+                      ¥{currentPrice.toFixed(2)}
+                    </div>
+                    {safeRanges.length > 0 && effectiveIndexPrice > 0 && (
+                      <div className="text-right">
+                        <div className="text-xs text-muted-foreground">异动价格</div>
+                        <div className="text-lg font-bold text-red-600">
+                          ¥{(safeRanges[0].baseStock * (effectiveIndexPrice / safeRanges[0].baseIndex + 2)).toFixed(2)}
+                        </div>
+                      </div>
+                    )}
                   </div>
+                  {realtime?.stockHigh && (
+                    <div className="text-xs text-muted-foreground mt-1">
+                      今高: ¥{realtime.stockHigh.toFixed(2)} | 今低: ¥{realtime.stockLow?.toFixed(2)}
+                    </div>
+                  )}
                 </CardContent>
               </Card>
               
@@ -354,8 +439,13 @@ export default function StockAnalyzer() {
                     </Badge>
                   </div>
                   <div className="text-3xl font-bold text-chart-4 mt-1">
-                    {data.latestIndexPrice.toFixed(2)}
+                    {(realtime?.indexPrice ?? data.latestIndexPrice).toFixed(2)}
                   </div>
+                  {realtime?.indexPrice && (
+                    <div className="text-xs text-muted-foreground mt-1">
+                      实时 | 昨收: {data.indexInfo?.lastClose?.toFixed(2) ?? '—'}
+                    </div>
+                  )}
                 </CardContent>
               </Card>
               
@@ -556,9 +646,12 @@ export default function StockAnalyzer() {
                       <Input
                         type="number"
                         step="10"
-                        value={indexPriceInput}
-                        onChange={(e) => setIndexPriceInput(e.target.value)}
-                        placeholder={data ? `${(data.realtimeIndexPrice > 0 ? data.realtimeIndexPrice : data.latestIndexPrice).toFixed(0)}` : '输入指数价格'}
+                        value={indexPriceManuallySet ? indexPriceInput : ''}
+                        onChange={(e) => {
+                          setIndexPriceInput(e.target.value)
+                          setIndexPriceManuallySet(true)
+                        }}
+                        placeholder={`实时: ${effectiveIndexPrice.toFixed(0)}`}
                         className="w-full sm:w-48 bg-input border-border text-foreground focus-visible:ring-primary/40 focus-visible:border-primary"
                       />
                       <span className="text-sm text-muted-foreground">
