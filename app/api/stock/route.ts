@@ -1,15 +1,23 @@
 import { NextRequest, NextResponse } from 'next/server'
 
-// 判断股票市场
+// 判断股票市场及对应指数
 function getMarketInfo(stockCode: string): { market: 'sh' | 'sz'; indexCode: string; indexName: string } | null {
   const code = stockCode.replace(/^(sh|sz|SH|SZ)/, '')
   
-  // 沪市: 60开头的主板, 68开头的科创板
-  if (code.startsWith('60') || code.startsWith('68')) {
+  // 科创板: 688开头 → 科创50指数
+  if (code.startsWith('688')) {
+    return { market: 'sh', indexCode: '000688', indexName: '科创50' }
+  }
+  // 沪市主板: 60开头 → 上证指数
+  if (code.startsWith('60')) {
     return { market: 'sh', indexCode: '000001', indexName: '上证指数' }
   }
-  // 深市: 00开头的主板, 30开头的创业板
-  if (code.startsWith('00') || code.startsWith('30')) {
+  // 创业板: 300/301开头 → 创业板指
+  if (code.startsWith('30')) {
+    return { market: 'sz', indexCode: '399006', indexName: '创业板指' }
+  }
+  // 深市主板: 000/001/002开头 → 深证成指
+  if (code.startsWith('00')) {
     return { market: 'sz', indexCode: '399001', indexName: '深证成指' }
   }
   return null
