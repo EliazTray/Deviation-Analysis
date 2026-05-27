@@ -8,17 +8,17 @@ function getMarketInfo(stockCode: string): { market: 'sh' | 'sz'; indexCode: str
   if (code.startsWith('688')) {
     return { market: 'sh', indexCode: '000688', indexName: '科创50' }
   }
-  // 沪市主板: 60开头 → 上证指数
+  // 沪市主板: 60开头 → 上证A股指数
   if (code.startsWith('60')) {
-    return { market: 'sh', indexCode: '000001', indexName: '上证指数' }
+    return { market: 'sh', indexCode: '000001', indexName: '上证A股指数' }
   }
-  // 创业板: 300/301开头 → 创业板指
+  // 创业板: 300/301开头 → 创业板综指
   if (code.startsWith('30')) {
-    return { market: 'sz', indexCode: '399006', indexName: '创业板指' }
+    return { market: 'sz', indexCode: '399102', indexName: '创业板综指' }
   }
-  // 深市主板: 000/001/002开头 → 深证成指
+  // 深市主板: 000/001/002开头 → 深证A股指数
   if (code.startsWith('00')) {
-    return { market: 'sz', indexCode: '399001', indexName: '深证成指' }
+    return { market: 'sz', indexCode: '399107', indexName: '深证A股指数' }
   }
   return null
 }
@@ -206,47 +206,93 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: '获取数据失败，请稍后重试' }, { status: 500 })
   }
 
-  // ===== 利用接口返回的数据作为交易日历，通过日期匹配确定窗口 =====
-  // 接口返回的每条数据就是一个真实交易日（已排除节假日），自带 date 字段
-  // 策略：从今天日期出发，在数据中找到<=今天的最新交易日，然后在数据中往前数30条就是基准日
+  // ===== 通过日期匹配构建窗口，确保股票和指数按日期对齐 =====
 
   const todayStr = (() => {
     const now = new Date()
     return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
   })()
 
-  // 在数据中找到 <= targetDate 的最近一条交易日的索引
-  function findDateIdx(data: { date: string }[], targetDate: string): number {
-    for (let i = data.length - 1; i >= 0; i--) {
-      if (data[i].date <= targetDate) return i
-    }
-    return 0
+  // 构建指数的日期索引 Map，用于按日期查找
+  const indexByDate = new Map<string, { date: string; close: number; open: number; high: number; low: number }>()
+  for (const item of allIndexData) {
+    indexByDate.set(item.date, item)
   }
 
-  // 1. 找到"当前交易日"在数据中的位置
-  //    先找到 <= 今天 的最新交易日，再往前偏移 offsetDays 个交易日
-  const todayIdx = findDateIdx(allStockData, todayStr)
-  const currentIdx = todayIdx - offsetDays
-  if (currentIdx < 0) {
+  // 以指数的交易日历为基准（指数不会停牌），确定交易日序列
+  // 找到 <= 今天 的最新交易日
+  let currentTradingDate = ''
+  for (let i = allIndexData.length - 1; i >= 0; i--) {
+    if (allIndexData[i].date <= todayStr) {
+      currentTradingDate = allIndexData[i].date
+      break
+    }
+  }
+  if (!currentTradingDate) {
+    return NextResponse.json({ error: '无法确定当前交易日' }, { status: 400 })
+  }
+
+  // 从当前交易日往前偏移 offsetDays 个交易日（在指数日历上）
+  const indexDates = allIndexData.map((d: { date: string }) => d.date)
+  let currentDateIdx = indexDates.lastIndexOf(currentTradingDate)
+  currentDateIdx -= offsetDays
+  if (currentDateIdx < 0) {
     return NextResponse.json({ error: '偏移天数过大，数据中没有足够的交易日' }, { status: 400 })
   }
+  currentTradingDate = indexDates[currentDateIdx]
 
-  // 2. 从"当前交易日"在数据中往前数30个交易日，就是基准日
-  //    因为数据中每条都是真实交易日，直接往前数30条即可
-  const baseIdx = currentIdx - 30
-  if (baseIdx < 0) {
-    return NextResponse.json({ error: `数据不足，当前交易日${allStockData[currentIdx]?.date}往前不够30个交易日` }, { status: 400 })
+  // 从当前交易日往前数30个交易日（在指数日历上），得到基准日
+  const baseDateIdx = currentDateIdx - 30
+  if (baseDateIdx < 0) {
+    return NextResponse.json({ error: `数据不足，当前交易日${currentTradingDate}往前不够30个交易日` }, { status: 400 })
+  }
+  const baseDate = indexDates[baseDateIdx]
+
+  // 构建窗口：从基准日到当前交易日，按指数日历的日期序列
+  // 对每个交易日，查找对应的股票数据（按日期匹配）
+  const stockByDate = new Map<string, { date: string; close: number; open: number; high: number; low: number }>()
+  for (const item of allStockData) {
+    stockByDate.set(item.date, item)
   }
 
-  // 取窗口数据（含基准日到当前交易日，共31条）
-  const stockData = allStockData.slice(baseIdx, currentIdx + 1)
-  const indexData = allIndexData.slice(baseIdx, currentIdx + 1)
+  const windowDates = indexDates.slice(baseDateIdx, currentDateIdx + 1)
+  const stockData: { date: string; close: number; open: number; high: number; low: number }[] = []
+  const indexData: { date: string; close: number; open: number; high: number; low: number }[] = []
+
+  for (const date of windowDates) {
+    const stockItem = stockByDate.get(date)
+    const indexItem = indexByDate.get(date)
+    if (!indexItem) continue
+    // 如果股票当天没有数据（停牌），用前一天的收盘价填充
+    if (stockItem) {
+      stockData.push(stockItem)
+      indexData.push(indexItem)
+    } else if (stockData.length > 0) {
+      const lastStock = stockData[stockData.length - 1]
+      stockData.push({ date, close: lastStock.close, open: lastStock.close, high: lastStock.close, low: lastStock.close })
+      indexData.push(indexItem)
+    }
+  }
 
   // 取更长窗口用于历史14天的滑动计算
-  // 14天前那天在数据中的位置是 currentIdx - 13，它的基准日是再往前30条
-  const extBaseIdx = Math.max(0, currentIdx - 13 - 30)
-  const extStockData = allStockData.slice(extBaseIdx, currentIdx + 1)
-  const extIndexData = allIndexData.slice(extBaseIdx, currentIdx + 1)
+  const extBaseDateIdx = Math.max(0, currentDateIdx - 13 - 30)
+  const extWindowDates = indexDates.slice(extBaseDateIdx, currentDateIdx + 1)
+  const extStockData: { date: string; close: number; open: number; high: number; low: number }[] = []
+  const extIndexData: { date: string; close: number; open: number; high: number; low: number }[] = []
+
+  for (const date of extWindowDates) {
+    const stockItem = stockByDate.get(date)
+    const indexItem = indexByDate.get(date)
+    if (!indexItem) continue
+    if (stockItem) {
+      extStockData.push(stockItem)
+      extIndexData.push(indexItem)
+    } else if (extStockData.length > 0) {
+      const lastStock = extStockData[extStockData.length - 1]
+      extStockData.push({ date, close: lastStock.close, open: lastStock.close, high: lastStock.close, low: lastStock.close })
+      extIndexData.push(indexItem)
+    }
+  }
 
   if (stockData.length < 20) {
     return NextResponse.json({ error: `数据不足，只有${stockData.length}天交易数据` }, { status: 400 })
@@ -256,8 +302,8 @@ export async function GET(request: NextRequest) {
   const baseStockPrice = stockData[0]?.close || 1
   const baseIndexPrice = indexData[0]?.close || 1
 
-  console.info(`[窗口] 今天: ${todayStr}, 数据最新交易日: ${allStockData[todayIdx]?.date}`)
-  console.info(`[匹配] 当前交易日: ${allStockData[currentIdx]?.date}, 基准日(前30交易日): ${allStockData[baseIdx]?.date}, 窗口: ${stockData.length}天`)
+  console.info(`[窗口] 今天: ${todayStr}, 当前交易日: ${currentTradingDate}, 基准日: ${baseDate}`)
+  console.info(`[匹配] 窗口: ${stockData.length}天, 基准股价: ${baseStockPrice}, 基准指数: ${baseIndexPrice}`)
   
   // 计算偏离值 - 使用正确的口径
   // 30日累计偏离 = 股票30日累计涨跌幅 - 指数30日累计涨跌幅
@@ -320,37 +366,42 @@ export async function GET(request: NextRequest) {
   console.info('resolvedStockName:', stockInfo?.name || stockCode.replace(/^(sh|sz|SH|SZ)/, ''))
 
   // 计算未来多天的安全价格区间
-  // 数据中最新交易日是 allStockData[todayIdx].date（如5.21），今天可能是5.22
-  // 今天(D+0)如果还没开盘，它的基准日 = 窗口中比当前基准日再往后1天
-  // 思路：今天到数据最新日之间差了几个交易日，就需要从窗口头部偏移几天
-  // 例如：数据最新是5.21（窗口最后一天），5.21的基准日=stockData[0]
-  //       5.22的基准日=stockData[1]，5.23的基准日=stockData[2]...
-  // 计算今天距数据最新交易日的"交易日差"
-  const latestDataDate = allStockData[todayIdx]?.date || todayStr
-  const todayDate = new Date(todayStr + 'T00:00:00')
-  const latestDate = new Date(latestDataDate + 'T00:00:00')
-  // 计算今天和数据最新日之间的交易日数（排除周末）
-  let futureTradingDayGap = 0
-  if (todayDate > latestDate) {
-    const tempDt = new Date(latestDate)
-    while (tempDt < todayDate) {
-      tempDt.setDate(tempDt.getDate() + 1)
-      const day = tempDt.getDay()
-      if (day !== 0 && day !== 6) {
-        futureTradingDayGap++
-      }
-    }
-  }
+  // D+0 = 今天（如果今天还没收盘，数据最新日是昨天，今天是下一个交易日）
+  // D+0 的30日基准 = 今天往前数第30个交易日
+  // 在指数日历上：如果 currentTradingDate 是数据最新日(如5.26)，今天(5.27)是下一天
+  //   今天(D+0)在日历上的虚拟位置 = currentDateIdx + 1
+  //   D+0的30日基准索引 = (currentDateIdx + 1) - 30 = currentDateIdx - 29
+  //   D+1的30日基准索引 = (currentDateIdx + 2) - 30 = currentDateIdx - 28
+  // 如果 currentTradingDate 就是今天(数据包含今天)：
+  //   今天(D+0)在日历上的位置 = currentDateIdx
+  //   D+0的30日基准索引 = currentDateIdx - 30 = baseDateIdx（就是当前窗口的基准日）
+  //   D+1的30日基准索引 = currentDateIdx - 29
+
+  const isTodayInData = currentTradingDate === todayStr
+  const d0Offset = isTodayInData ? 0 : 1  // D+0相对currentDateIdx的偏移
 
   const safeRanges: { date: string; baseStock: number; baseIndex: number; minSafe: number; maxSafe: number }[] = []
-  // D+0（今天）的基准日 = stockData[futureTradingDayGap]
-  // D+1（明天）的基准日 = stockData[futureTradingDayGap + 1]
-  // 以此类推
+
   for (let i = 0; i < 8; i++) {
-    const baseOffset = futureTradingDayGap + i
-    if (baseOffset >= stockData.length) break
-    const baseS = stockData[baseOffset]?.close
-    const baseI = indexData[baseOffset]?.close
+    // D+i 的30日基准在指数日历中的索引
+    const futureBaseDateIdx = (currentDateIdx + d0Offset + i) - 30
+
+    if (futureBaseDateIdx < 0 || futureBaseDateIdx >= indexDates.length) continue
+
+    const futureBaseDate = indexDates[futureBaseDateIdx]
+    const baseI = indexByDate.get(futureBaseDate)?.close
+    // 股票基准价：按日期查找，如果停牌则用之前最近的收盘价
+    let baseS: number | undefined
+    const stockOnBaseDate = stockByDate.get(futureBaseDate)
+    if (stockOnBaseDate) {
+      baseS = stockOnBaseDate.close
+    } else {
+      for (let j = futureBaseDateIdx - 1; j >= 0; j--) {
+        const prevStock = stockByDate.get(indexDates[j])
+        if (prevStock) { baseS = prevStock.close; break }
+      }
+    }
+
     if (baseS == null || baseI == null) continue
 
     const ratio = latestIndexPrice / baseI
@@ -358,15 +409,15 @@ export async function GET(request: NextRequest) {
     const minSafe = Math.max(0.01, baseS * (ratio - 2))
 
     safeRanges.push({
-      date: stockData[baseOffset].date,
+      date: futureBaseDate,
       baseStock: baseS,
       baseIndex: baseI,
       minSafe: Math.round(minSafe * 100) / 100,
       maxSafe: Math.round(maxSafe * 100) / 100
     })
   }
-  
-  console.info(`[safeRanges] 数据最新日: ${latestDataDate}, 今天: ${todayStr}, 交易日差: ${futureTradingDayGap}, 首个基准日: ${safeRanges[0]?.date}`)
+
+  console.info(`[safeRanges] 当前交易日: ${currentTradingDate}, isTodayInData: ${isTodayInData}, D+0基准日: ${safeRanges[0]?.date}, 共${safeRanges.length}条`)
   
   // 计算过去14个交易日的每日累计偏离值（使用滑动的30日基准）
   // extStockData 中每条数据就是一个真实交易日，从某天往前数30条就是该天的30交易日基准
@@ -376,11 +427,12 @@ export async function GET(request: NextRequest) {
   const historicalDeviations: {
     date: string; stockPrice: number; indexPrice: number;
     high: number; low: number;
+    dailyChange: number; intradayHighChange: number;
     stockCumulativeChange: number; indexCumulativeChange: number;
     cumulativeDeviation: number; daysAgo: number;
     baseDate: string; baseStockPrice: number;
-    safeMax: number; ma5: number;
-    nearSafeMax: boolean; suspectControl: boolean; lostControl: boolean;
+    safeMax: number; ma5: number; lowDeviationFromMa5: number;
+    nearSafeMax: boolean; suspectControl: boolean; lostControl: boolean; outOfControl: boolean;
   }[] = []
   // 取 extStockData 的最后14天，每天独立计算30日偏离
   for (let dayIdx = 0; dayIdx < 14; dayIdx++) {
