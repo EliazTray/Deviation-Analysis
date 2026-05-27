@@ -195,8 +195,14 @@ export default function StockAnalyzer() {
 
   const addRecentStock = (code: string, name: string) => {
     const normalized = code.replace(/^(sh|sz|SH|SZ)/, '')
+    // 不自动淘汰旧的，只去重后追加到头部
     const next: RecentStock[] = [{ code: normalized, name }, ...recentStocks.filter((item) => item.code !== normalized)]
-      .slice(0, 8)
+    setRecentStocks(next)
+    saveRecentStocks(next)
+  }
+
+  const removeRecentStock = (code: string) => {
+    const next = recentStocks.filter((item) => item.code !== code)
     setRecentStocks(next)
     saveRecentStocks(next)
   }
@@ -375,14 +381,23 @@ export default function StockAnalyzer() {
                   <div className="text-sm text-muted-foreground mb-2">快捷查询</div>
                   <div className="flex flex-wrap gap-2">
                     {recentStocks.map((item) => (
-                      <button
-                        key={item.code}
-                        type="button"
-                        onClick={() => handleRecentSelect(item.code)}
-                        className="rounded-full border border-border bg-card px-3 py-1 text-xs text-foreground transition hover:border-primary hover:text-primary"
-                      >
-                        {item.code}{item.name ? ` · ${item.name}` : ''}
-                      </button>
+                      <div key={item.code} className="group relative flex items-center">
+                        <button
+                          type="button"
+                          onClick={() => handleRecentSelect(item.code)}
+                          className="rounded-full border border-border bg-card px-3 py-1 pr-6 text-xs text-foreground transition hover:border-primary hover:text-primary"
+                        >
+                          {item.code}{item.name ? ` · ${item.name}` : ''}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); removeRecentStock(item.code) }}
+                          className="absolute right-1 top-1/2 -translate-y-1/2 w-4 h-4 rounded-full flex items-center justify-center text-muted-foreground opacity-0 group-hover:opacity-100 hover:bg-destructive/20 hover:text-destructive transition-opacity text-xs"
+                          title="删除"
+                        >
+                          ×
+                        </button>
+                      </div>
                     ))}
                   </div>
                 </div>
