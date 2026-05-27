@@ -9,10 +9,38 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Badge } from '@/components/ui/badge'
 import { Search, TrendingUp, TrendingDown, AlertTriangle, Activity } from 'lucide-react'
 
-interface DateRange {
-  startDate: string
-  endDate: string
-  tradingDays: number
+interface PriceItem {
+  date: string
+  close: number
+  open: number
+  high: number
+  low: number
+}
+
+// 后端返回的原始数据
+interface ApiResponse {
+  stockCode: string
+  stockName: string
+  market: string
+  indexName: string
+  indexCode: string
+  stockData: PriceItem[]   // [0]=期初前(基准日), [1]=期初, ..., [-1]=当前交易日
+  indexData: PriceItem[]
+  extStockData: PriceItem[]
+  extIndexData: PriceItem[]
+  realtimeStockPrice: number
+  realtimeIndexPrice: number
+  latestStockPrice: number
+  latestIndexPrice: number
+  stockInfo: {
+    name: string
+    open: number
+    lastClose: number
+    current: number | null
+    high: number
+    low: number
+  } | null
+  currentTradingDate: string
   offsetDays: number
 }
 
@@ -28,14 +56,15 @@ interface DeviationData {
   cumulativeDeviation: number
 }
 
+// 前端计算后的完整数据
 interface StockData {
   stockCode: string
   stockName: string
   market: string
   indexName: string
   indexCode: string
-  stockData: { date: string; close: number; open: number; high: number; low: number }[]
-  indexData: { date: string; close: number; open: number; high: number; low: number }[]
+  stockData: PriceItem[]
+  indexData: PriceItem[]
   deviations: DeviationData[]
   totalDeviation: number
   realtimeStockPrice: number
@@ -51,7 +80,10 @@ interface StockData {
     high: number
     low: number
   } | null
-  dateRange: DateRange
+  indexInfo?: {
+    lastClose?: number
+  } | null
+  dateRange: { startDate: string; endDate: string; tradingDays: number; offsetDays: number }
   baseStockPrice: number
   baseIndexPrice: number
   safeRanges?: SafeRange[]
@@ -100,6 +132,144 @@ interface RealtimePrice {
   stockLow: number | null
   indexPrice: number | null
   timestamp: number
+}
+
+/**
+ * 将后端原始数据转换为前端展示所需的完整计算结果
+ * 规则：
+ * - stockData[0]/indexData[0] = 期初前（基准价=期初日前一个交易日的收盘价）
+ * - stockData[1:] = 30天窗口（期初到期末）
+ * - 偏离 = (期末价/基准价 - 1)*100 - (期末指数/基准指数 - 1)*100
+ * - 安全上限 = 基准股价 * (最新指数/基准指数 + 2)，偏离达200%触发
+ * - 30天含当天：期末=今天(盘中用实时价)，从期末往前数30天=期初
+ */
+function computeStockData(api: ApiResponse): StockData {
+  const { stockData, indexData, extStockData, extIndexData } = api
+  // 基准 = 期初前收盘价（stockData[0]是期初前那一天）
+  const baseStockPrice = stockData[0]?.close || 1
+  const baseIndexPrice = indexData[0]?.close || 1
+  const latestStockPrice = stockData[stockData.length - 1]?.close || 0
+  const latestIndexPrice = indexData[indexData.length - 1]?.close || 0
+  const realtimeStockPrice = api.realtimeStockPrice || latestStockPrice
+  const realtimeIndexPrice = api.realtimeIndexPrice || latestIndexPrice
+
+  // 计算偏离值（stockData含期初前，所以从[0]开始都算）
+  const deviations: DeviationData[] = stockData.map((stock, index) => {
+    const idx = indexData[index]
+    if (!idx) return null
+    const prevStock = stockData[index - 1]
+    const prevIndex = indexData[index - 1]
+    const stockChange = prevStock ? ((stock.close - prevStock.close) / prevStock.close) * 100 : 0
+    const indexChange = prevIndex ? ((idx.close - prevIndex.close) / prevIndex.close) * 100 : 0
+    const stockCumulativeChange = ((stock.close - baseStockPrice) / baseStockPrice) * 100
+    const indexCumulativeChange = ((idx.close - baseIndexPrice) / baseIndexPrice) * 100
+    return {
+      date: stock.date,
+      stockPrice: stock.close,
+      indexPrice: idx.close,
+      stockChange,
+      indexChange,
+      deviation: stockChange - indexChange,
+      stockCumulativeChange,
+      indexCumulativeChange,
+      cumulativeDeviation: stockCumulativeChange - indexCumulativeChange,
+    }
+  }).filter((d): d is DeviationData => d !== null)
+
+  const totalDeviation = deviations[deviations.length - 1]?.cumulativeDeviation || 0
+  const realtimeTotalDeviation = ((realtimeStockPrice - baseStockPrice) / baseStockPrice) * 100 - ((realtimeIndexPrice - baseIndexPrice) / baseIndexPrice) * 100
+
+  // 安全区间：D+0~D+7
+  // 后端已把今天实时数据补入，所以 extData 最后一条就是今天（期末=第1天）
+  // 30天含当天：期初 = 计算日 - 29，基准 = 期初前一天收盘价
+  const safeRanges: SafeRange[] = []
+  const extLen = extStockData.length
+  // D+0 = 当前最后一条（今天盘中实时 or 最新已收盘日）
+  const d0ExtIdx = extLen - 1
+
+  for (let i = 0; i < 8; i++) {
+    const calcIdx = d0ExtIdx + i
+    const startIdx = calcIdx - 29  // 期初日
+    const preBaseIdx = startIdx - 1  // 期初前（基准）
+    if (preBaseIdx < 0 || preBaseIdx >= extLen) continue
+    const baseS = extStockData[preBaseIdx]?.close
+    const baseI = extIndexData[preBaseIdx]?.close
+    if (baseS == null || baseI == null) continue
+
+    const ratio = latestIndexPrice / baseI
+    const maxSafe = baseS * (ratio + 2)
+    const minSafe = Math.max(0.01, baseS * (ratio - 2))
+
+    safeRanges.push({
+      date: extStockData[startIdx]?.date || extStockData[preBaseIdx].date,
+      baseStock: baseS,
+      baseIndex: baseI,
+      minSafe: Math.round(minSafe * 100) / 100,
+      maxSafe: Math.round(maxSafe * 100) / 100,
+    })
+  }
+
+  // 历史14天偏离追踪
+  const historicalDeviations: HistoricalDeviation[] = []
+  for (let dayIdx = 0; dayIdx < 14; dayIdx++) {
+    const currentIdx = extLen - 14 + dayIdx
+    if (currentIdx < 31 || currentIdx >= extLen) continue
+    const startIdx = currentIdx - 29  // 期初日
+    const preBaseIdx = startIdx - 1   // 期初前（基准）
+    const currentStock = extStockData[currentIdx]
+    const currentIndex = extIndexData[currentIdx]
+    const baseStock = extStockData[preBaseIdx]
+    const baseIndex = extIndexData[preBaseIdx]
+    if (!currentStock || !currentIndex || !baseStock || !baseIndex) continue
+
+    const stockCumChange = ((currentStock.close - baseStock.close) / baseStock.close) * 100
+    const indexCumChange = ((currentIndex.close - baseIndex.close) / baseIndex.close) * 100
+    const cumDeviation = stockCumChange - indexCumChange
+    const indexRatio = currentIndex.close / baseIndex.close
+    const safeMax = baseStock.close * (indexRatio + 2)
+
+    let ma5Sum = 0, ma5Count = 0
+    for (let k = 0; k < 5; k++) {
+      const maIdx = currentIdx - k
+      if (maIdx >= 0 && extStockData[maIdx]) { ma5Sum += extStockData[maIdx].close; ma5Count++ }
+    }
+    const ma5 = ma5Count > 0 ? ma5Sum / ma5Count : currentStock.close
+    const nearSafeMax = currentStock.high >= safeMax * 0.97
+    const suspectControl = nearSafeMax && currentStock.close > 0 && ((currentStock.high - currentStock.close) / currentStock.close) >= 0.03
+    const lowDeviationFromMa5 = ma5 > 0 ? ((ma5 - currentStock.low) / ma5) * 100 : 0
+    const lostControl = lowDeviationFromMa5 >= 3
+    const outOfControl = lowDeviationFromMa5 >= 10
+
+    const prevIdx = currentIdx - 1
+    const prevClose = prevIdx >= 0 && extStockData[prevIdx] ? extStockData[prevIdx].close : currentStock.close
+    const dailyChange = ((currentStock.close - prevClose) / prevClose) * 100
+    const intradayHighChange = ((currentStock.high - prevClose) / prevClose) * 100
+
+    historicalDeviations.push({
+      date: currentStock.date, stockPrice: currentStock.close, high: currentStock.high, low: currentStock.low,
+      indexPrice: currentIndex.close, dailyChange, intradayHighChange,
+      stockCumulativeChange: stockCumChange, indexCumulativeChange: indexCumChange, cumulativeDeviation: cumDeviation,
+      daysAgo: 13 - dayIdx, baseDate: baseStock.date, baseStockPrice: baseStock.close,
+      safeMax: Math.round(safeMax * 100) / 100, ma5: Math.round(ma5 * 100) / 100,
+      lowDeviationFromMa5: Math.round(lowDeviationFromMa5 * 100) / 100,
+      nearSafeMax, suspectControl, lostControl, outOfControl,
+    })
+  }
+
+  return {
+    stockCode: api.stockCode, stockName: api.stockName, market: api.market,
+    indexName: api.indexName, indexCode: api.indexCode,
+    stockData, indexData, deviations, totalDeviation,
+    realtimeStockPrice, realtimeIndexPrice, realtimeTotalDeviation,
+    latestStockPrice, latestIndexPrice, stockInfo: api.stockInfo,
+    dateRange: {
+      startDate: stockData[0]?.date || '',
+      endDate: stockData[stockData.length - 1]?.date || '',
+      tradingDays: stockData.length,
+      offsetDays: api.offsetDays,
+    },
+    baseStockPrice, baseIndexPrice, safeRanges, historicalDeviations,
+  }
 }
 
 export default function StockAnalyzer() {
@@ -231,7 +401,7 @@ export default function StockAnalyzer() {
         return
       }
 
-      setData(result)
+      setData(computeStockData(result as ApiResponse))
       // 数据加载后重置手动标记，让实时值自动生效
       setIndexPriceManuallySet(false)
       setIndexPriceInput('')
